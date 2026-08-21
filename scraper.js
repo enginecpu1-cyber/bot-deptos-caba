@@ -353,18 +353,26 @@ async function main() {
   const uniqueMatches = Array.from(new Map(allMatches.map((m) => [m.id, m])).values());
   uniqueMatches.sort((a, b) => a.price - b.price);
 
-  if (uniqueMatches.length === 0) {
-    console.log("Sin deptos nuevos que cumplan los criterios en esta corrida.");
-    return;
-  }
-
   if (dryRun) {
+    if (uniqueMatches.length === 0) {
+      console.log("[DRY RUN] Sin deptos nuevos que cumplan los criterios en esta corrida.");
+      return;
+    }
     console.log(`[DRY RUN] ${uniqueMatches.length} matches (no se envía ni se guarda estado):\n`);
     for (const m of uniqueMatches) console.log(formatCaption(m) + `\n[img: ${m.image}]\n---`);
     return;
   }
 
+  // Corre siempre (aunque no haya deptos nuevos): así alguien que recién le escribió
+  // al bot queda sumado a los avisos desde la próxima corrida, no desde el próximo match.
   const refreshedChatIds = await refreshChatIds();
+
+  if (uniqueMatches.length === 0) {
+    console.log("Sin deptos nuevos que cumplan los criterios en esta corrida.");
+    saveSentIds(sentIds);
+    return;
+  }
+
   const chatIds = new Set(refreshedChatIds);
   if (TELEGRAM_CHAT_ID) chatIds.add(String(TELEGRAM_CHAT_ID));
 
