@@ -1,0 +1,8 @@
+{
+  "name": "bot-deptos-caba-cron",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "wrangler": "^4.125.0"
+  }
+}

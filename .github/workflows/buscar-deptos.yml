@@ -29,6 +29,6 @@ jobs:
         run: |
           git config user.name "bot-deptos-caba"
           git config user.email "actions@github.com"
-          git add sent_ids.json
+          git add sent_ids.json chat_ids.json
           git diff --cached --quiet || git commit -m "Actualiza avisos enviados"
           git push
