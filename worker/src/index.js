@@ -23,36 +23,8 @@ async function dispatchGitHubWorkflow(env) {
   }
 }
 
-// GitHub Actions tiene la IP bloqueada por el WAF de Argenprop (403 directo,
-// challenge de AWS WAF), Cloudflare no. El scraper le pide las páginas de
-// Argenprop a este proxy en vez de pedírselas directo.
-async function handleArgenpropProxy(request, env) {
-  const auth = request.headers.get("Authorization");
-  if (auth !== `Bearer ${env.WEBHOOK_SECRET}`) {
-    return new Response("unauthorized", { status: 401 });
-  }
-
-  const target = new URL(request.url).searchParams.get("url");
-  if (!target || !/^https:\/\/(www\.)?argenprop\.com\//.test(target)) {
-    return new Response("bad url", { status: 400 });
-  }
-
-  const r = await fetch(target, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-      "Accept-Language": "es-AR,es;q=0.9",
-    },
-  });
-  return new Response(await r.text(), { status: r.status });
-}
-
 export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (url.pathname === "/argenprop-proxy") {
-      return handleArgenpropProxy(request, env);
-    }
+  async fetch() {
     return new Response("ok", { status: 200 });
   },
 

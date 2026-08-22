@@ -1,4 +1,4 @@
-// Bot de búsqueda de deptos en alquiler (MercadoLibre + Argenprop) en CABA -> avisa por Telegram con foto.
+// Bot de búsqueda de deptos en alquiler (MercadoLibre + Properati) en CABA -> avisa por Telegram con foto.
 // Corre vía GitHub Actions (ver .github/workflows/buscar-deptos.yml).
 
 const cheerio = require("cheerio");
@@ -17,12 +17,6 @@ const STATE_FILE = path.join(__dirname, "sent_ids.json");
 const CHATS_FILE = path.join(__dirname, "chat_ids.json");
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-
-// Argenprop bloquea las IPs de GitHub Actions con un challenge de AWS WAF (403 directo).
-// Si está configurado, las páginas de Argenprop se piden a través del proxy en el Worker
-// de Cloudflare (que sí llega); si no, cae al fetch directo (sirve para correr local).
-const ARGENPROP_PROXY_URL = process.env.ARGENPROP_PROXY_URL;
-const ARGENPROP_PROXY_SECRET = process.env.ARGENPROP_PROXY_SECRET;
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
@@ -170,89 +164,107 @@ async function fetchML(barrio) {
   return parseMLCards(await res.text(), barrio);
 }
 
-// --- Argenprop ---
-// Sin filtro de URL confiable para precio/ambientes (los que probamos no aplicaron), así que
-// se trae solo con el filtro de amoblado (confirmado, ?con-amoblado) y se filtra acá con los
-// datos que cada card ya trae en sus atributos (montooperacion, dormitorios, idmoneda).
+// --- Properati ---
+// Sin filtro de URL confiable para precio (minPrice/maxPrice no aplican) ni amoblado
+// (no existe como filtro), así que se trae por dormitorios (0=monoambiente, 1≈2 ambientes)
+// y se filtra acá por precio y por mención de "amoblado" en el título/descripción.
+// A diferencia de Argenprop y Zonaprop, no tiene protección anti-bot (WAF/challenge JS):
+// responde 200 con el HTML completo desde cualquier IP, confirmado en vivo.
 
-function buildArgenpropUrl(barrio) {
-  return `https://www.argenprop.com/departamentos/alquiler/${barrio}?con-amoblado`;
+function buildProperatiUrl(barrio, dormitorios) {
+  return `https://www.properati.com.ar/s/${barrio}/departamento/alquiler/dormitorios:${dormitorios}`;
 }
 
-function parseArgenpropCards(html, barrio) {
+function parseProperatiCards(html, barrio, roomsFallback) {
   const $ = cheerio.load(html);
   const listings = [];
 
-  $("div.listing__item").each((_, el) => {
+  $("article.snippet").each((_, el) => {
     const card = $(el);
-    const anchor = card.find("a.card").first();
-    const link = anchor.attr("href");
-    const idAttr = anchor.attr("data-item-card") || anchor.attr("idaviso");
-    if (!link || !idAttr) return;
+    const titleEl = card.find('a[data-test="snippet__title"]').first();
+    const title = titleEl.text().trim();
+    const link = titleEl.attr("href");
+    if (!title || !link) return;
 
-    const title =
-      card.find(".card__title--primary").first().text().trim() ||
-      card.find(".card__title").first().text().trim();
-    const address = card.find(".card__address").first().text().trim();
+    const idMatch = link.match(/\/detalle\/([a-z0-9-]+)$/i);
+    const id = idMatch ? `PR${idMatch[1]}` : link;
 
-    const priceRaw = anchor.attr("montooperacion");
-    const price = priceRaw ? parseInt(priceRaw, 10) : null;
-    const currency = anchor.attr("idmoneda") === "2" ? "USD" : "ARS";
+    const priceText = card.find('[data-test="snippet__price"]').first().text().trim();
+    const isUSD = /^USD/i.test(priceText);
+    const priceDigits = priceText.replace(/[^\d]/g, "");
+    const price = priceDigits ? parseInt(priceDigits, 10) : null;
 
-    const dormitorios = anchor.attr("dormitorios");
-    const ambientesAttr = anchor.attr("ambientes");
-
-    const infoText = card.find(".card__info").first().text().trim();
-    const rooms =
-      roomsLabel(infoText) ||
-      roomsLabel(title) ||
-      (dormitorios === "0" ? "Monoambiente" : ambientesAttr ? `${ambientesAttr} ambientes` : null);
-
-    const image =
-      card.find("img[data-src]").first().attr("data-src") ||
-      card.find("img").first().attr("src") ||
-      null;
+    const location = card.find('[data-test="snippet__location"]').first().text().trim();
+    const bedroomsText = card.find('[data-test="bedrooms-value"]').first().text().trim();
+    const image = card.find(".snippet__image img").first().attr("src") || null;
 
     listings.push({
-      id: `AP${idAttr}`,
-      source: "argenprop",
-      title: title || address,
-      link: link.startsWith("http") ? link : `https://www.argenprop.com${link}`,
+      id,
+      source: "properati",
+      title,
+      link,
       price,
-      priceCurrency: currency,
-      location: address ? `${address}, ${barrio}` : barrio,
+      priceCurrency: isUSD ? "USD" : "ARS",
+      location,
       image,
       barrio,
-      rooms,
-      balcon: hasBalcon(title) || hasBalcon(infoText),
+      rooms: roomsLabel(bedroomsText) || roomsLabel(title) || roomsFallback,
+      balcon: hasBalcon(title),
     });
   });
 
   return listings;
 }
 
-async function fetchArgenprop(barrio) {
-  const target = buildArgenpropUrl(barrio);
-  const res = ARGENPROP_PROXY_URL
-    ? await fetch(`${ARGENPROP_PROXY_URL}/argenprop-proxy?url=${encodeURIComponent(target)}`, {
-        headers: { Authorization: `Bearer ${ARGENPROP_PROXY_SECRET}` },
-      })
-    : await fetch(target, {
-        headers: {
-          "User-Agent": USER_AGENT,
-          "Accept-Language": "es-AR,es;q=0.9",
-        },
-      });
-  if (!res.ok) {
-    console.error(`[argenprop:${barrio}] HTTP ${res.status}`);
-    return [];
+async function fetchProperati(barrio) {
+  const listings = [];
+  // dormitorios:0 = monoambiente, dormitorios:1 ≈ 2 ambientes — cubre el rango pedido.
+  for (const [dormitorios, roomsFallback] of [
+    [0, "Monoambiente"],
+    [1, "2 ambientes"],
+  ]) {
+    const url = buildProperatiUrl(barrio, dormitorios);
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "es-AR,es;q=0.9",
+      },
+    });
+    if (!res.ok) {
+      console.error(`[properati:${barrio}:${dormitorios}] HTTP ${res.status}`);
+      continue;
+    }
+    listings.push(...parseProperatiCards(await res.text(), barrio, roomsFallback));
+    await new Promise((r) => setTimeout(r, 400));
   }
-  return parseArgenpropCards(await res.text(), barrio);
+  return listings;
+}
+
+// Properati no tiene filtro nativo de amoblado ni lo suele mencionar en el título
+// (confirmado: 0 de ~180 títulos probados). Para confirmarlo hay que abrir la ficha del
+// aviso y revisar la descripción y la lista de características, igual que hace el bot de
+// autos con ML. Solo se llama para candidatos que ya pasaron precio (para no pedir de más).
+async function isProperatiAmoblado(link) {
+  try {
+    const res = await fetch(link, {
+      headers: { "User-Agent": USER_AGENT, "Accept-Language": "es-AR,es;q=0.9" },
+    });
+    if (!res.ok) return false;
+    const html = await res.text();
+    const descMatch = html.match(/id="description-text" class="content">([\s\S]*?)<\/div>/);
+    const desc = descMatch ? descMatch[1] : "";
+    const facilities = [...html.matchAll(/facilities__item"><li><span>([^<]*)<\/span>/g)]
+      .map((m) => m[1])
+      .join(" ");
+    return /amoblad[oa]/i.test(desc) || /amoblad[oa]/i.test(facilities);
+  } catch {
+    return false;
+  }
 }
 
 // --- Filtro común ---
 
-function evaluateListing(listing) {
+async function evaluateListing(listing) {
   if (listing.price == null) return null;
 
   // Solo confiamos en el precio cuando está en pesos: en USD no tenemos cotización
@@ -263,6 +275,11 @@ function evaluateListing(listing) {
   // "Alquiler temporario" se publica en pesos por día (no por mes), así que su precio
   // no es comparable contra el rango mensual pedido — se descarta para no engañar.
   if (/temporari[oa]/i.test(listing.title)) return null;
+
+  if (listing.source === "properati") {
+    const amoblado = await isProperatiAmoblado(listing.link);
+    if (!amoblado) return null;
+  }
 
   return listing;
 }
@@ -339,7 +356,7 @@ async function main() {
       const listings = await fetchML(barrio);
       for (const listing of listings) {
         if (sentIds[listing.id]) continue;
-        const evaluated = evaluateListing(listing);
+        const evaluated = await evaluateListing(listing);
         if (evaluated) allMatches.push(evaluated);
       }
     } catch (err) {
@@ -348,16 +365,16 @@ async function main() {
     await new Promise((r) => setTimeout(r, 500)); // ser educado con ML
 
     try {
-      const listings = await fetchArgenprop(barrio);
+      const listings = await fetchProperati(barrio);
       for (const listing of listings) {
         if (sentIds[listing.id]) continue;
-        const evaluated = evaluateListing(listing);
+        const evaluated = await evaluateListing(listing);
         if (evaluated) allMatches.push(evaluated);
       }
     } catch (err) {
-      console.error(`Error en Argenprop ${barrio}:`, err.message);
+      console.error(`Error en Properati ${barrio}:`, err.message);
     }
-    await new Promise((r) => setTimeout(r, 500)); // ser educado con Argenprop
+    await new Promise((r) => setTimeout(r, 500)); // ser educado con Properati
   }
 
   const uniqueMatches = Array.from(new Map(allMatches.map((m) => [m.id, m])).values());
