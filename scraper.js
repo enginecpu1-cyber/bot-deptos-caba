@@ -18,6 +18,12 @@ const CHATS_FILE = path.join(__dirname, "chat_ids.json");
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+// Argenprop bloquea las IPs de GitHub Actions con un challenge de AWS WAF (403 directo).
+// Si está configurado, las páginas de Argenprop se piden a través del proxy en el Worker
+// de Cloudflare (que sí llega); si no, cae al fetch directo (sirve para correr local).
+const ARGENPROP_PROXY_URL = process.env.ARGENPROP_PROXY_URL;
+const ARGENPROP_PROXY_SECRET = process.env.ARGENPROP_PROXY_SECRET;
+
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
@@ -226,13 +232,17 @@ function parseArgenpropCards(html, barrio) {
 }
 
 async function fetchArgenprop(barrio) {
-  const url = buildArgenpropUrl(barrio);
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": USER_AGENT,
-      "Accept-Language": "es-AR,es;q=0.9",
-    },
-  });
+  const target = buildArgenpropUrl(barrio);
+  const res = ARGENPROP_PROXY_URL
+    ? await fetch(`${ARGENPROP_PROXY_URL}/argenprop-proxy?url=${encodeURIComponent(target)}`, {
+        headers: { Authorization: `Bearer ${ARGENPROP_PROXY_SECRET}` },
+      })
+    : await fetch(target, {
+        headers: {
+          "User-Agent": USER_AGENT,
+          "Accept-Language": "es-AR,es;q=0.9",
+        },
+      });
   if (!res.ok) {
     console.error(`[argenprop:${barrio}] HTTP ${res.status}`);
     return [];
